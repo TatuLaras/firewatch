@@ -160,8 +160,11 @@ static inline void ensure_init(void) {
         inotify_fp = inotify_init();
 
     // Create watch thread
-    if (!thread_id)
+    if (!thread_id) {
         pthread_create(&thread_id, NULL, &watch_for_changes, 0);
+        assert(thread_id);
+        pthread_detach(thread_id);
+    }
 
     assert((inotify_fp > 0));
 }
