@@ -1,5 +1,5 @@
 # firewatch
-Firewatch is a single-header library that makes it simple to implement hot-reload functionality for files.
+Firewatch is a single-header library that makes it simpler to implement hot-reload functionality for files.
 
 ## Installation
 Copy the `firewatch.h` header file somewhere in your codebase.
