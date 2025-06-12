@@ -14,37 +14,39 @@ After this, you can `#include` the header file in as many files as you need, as 
 
 ## Usage
 
-There is two ways to use firewatch.
-
-First is the one where a callback is provided that is called from a firewatch-managed thread each time a file changes.
-This approach doesn't work for use cases where the files need to be loaded from the main thread, if for example we're loading textures into GPU memory using an OpenGL context. This is why there's also a stack-based second method.
-
 The function signature for adding a new file to be watched by firewatch looks like this:
 ```c
-void firewatch_new_file(const char *filepath,
+void firewatch_new_file(const char *filepath, uint64_t cookie,
                         FileRefreshFunction on_change_callback,
-                        uint64_t cookie);
+                        int load_instantly);
 ```
 
-**`filepath`**: The relative or absolute path of your file.
-Directories are not supported for this function.
-The file doesn't need to exist at the moment of calling this function but the directory it resides in does.
+**`filepath`**: The file to watch. Must be a file, not a directory. The parent
+directory of the file must exist, the file itself doesn't need to.
+Relative paths are allowed.
 
-**`on_change_callback`**: Function pointer to the function that will be called each time the file in question changes.
-It's signature will look like this:
+**`cookie`**: Any arbitrary integer that will be passed to the callback as an
+argument.
+
+**`on_change_callback`**: A function pointer for a function that takes two
+parameters, matching the first two parameters of this function.
 ```c
 void your_function(const char* filepath, uint64_t cookie);
 ```
-where **`cookie`** and **`filepath`** will be the same as the values provided to the `firewatch_new_file` function.
 
-This parameter can be `NULL`. 
-In that case, information about changes to the file will be pushed to an internal stack instead of the callback being called.
+**`load_instantly`**: If 1, the `on_change_callback` will immediately be called
+from a separate thread when the file changes. If for some reason the file
+needs to be loaded from the current thread, put 0 here. In that case,
+`on_change_callback` will be called from the current thread when the
+firewatch_check function is called.
 
-**`cookie`**: This can be any arbitrary integer.
-This will be passed to the callback (or stack object) and can be used for referencing indices of an array for example.
+---
+There is two ways to use this library, depending on whether or not your files can be loaded from a separate thread.
+### Load files from separate thread
 
-### Callback method
+To load files from a separate thread, simply call `firewatch_new_file` as detailed above, with the **`load_instantly`** parameter being 1.
 
+#### Example
 ```c
 #define FIREWATCH_IMPLEMENTATION
 #include "firewatch.h"
@@ -60,8 +62,8 @@ void texture_callback(const char *filepath, uint64_t cookie) {
 }
 
 int main(void) {
-    firewatch_new_file("shaders/example.frag", &shader_callback, 0);
-    firewatch_new_file("textures/grass.png", &texture_callback, 0);
+    firewatch_new_file("shaders/example.frag", 0, &shader_callback, 1);
+    firewatch_new_file("textures/grass.png", 0, &texture_callback, 1);
 
     while (1) {
         // Doing normal application stuff...
@@ -74,45 +76,20 @@ int main(void) {
 }
 ```
 
-### Stack method
-In case the files need to be loaded from the current main thread, this method probably works better for you.
-If parameter **`on_change_callback`** of `firewatch_new_file` is `NULL`, information about updates to that file will be pushed to an internal stack instead of calling a callback.
-Elements of this stack can be accessed through the following function:
-```c
-int firewatch_request_stack_pop(LoadRequest *out_load_request);
-```
-**`out_load_request`**: Out parameter, pointer to a LoadRequest stack variable in which possible file update information will be written to.
-
-Return value of this will be 1 in case there was updates and information was written to `out_load_request`, 0 otherwise.
-
-`LoadRequest`  is the following struct:
-```c
-typedef struct {
-    char filepath[PATH_MAX];
-    uint32_t kind;
-    uint64_t cookie;
-} LoadRequest;
-```
-Each member will be equivalent to parameters given to `firewatch_new_file_ex`.
-
----
-Previously, it was possible to differentiate between different kinds of files by using a different callback function for each of them.
-Since we're not using callbacks anymore, an extended parameter set for `firewatch_new_file` is available:
+### Load files from current thread
+To load files from the current thread, supply `firewatch_new_file` with argument **`load_instantly`** value 0.
+In addition to this, you also need to regularly call another function, `firewatch_check`.
 
 ```c
-void firewatch_new_file_ex(const char *filepath,
-                           FileRefreshFunction on_change_callback,
-                           uint64_t cookie, uint32_t kind);
+void firewatch_check(void);
 ```
-Where the new parameter **`kind`** is any arbitrary integer.
-This number can be used to make the distinction.
 
+This function will call your callback in case file changes have occurred since the last run of this function.
+
+#### Example
 ```c
 #define FIREWATCH_IMPLEMENTATION
 #include "firewatch.h"
-
-#define FILE_KIND_SHADER 0
-#define FILE_KIND_TEXTURE 1
 
 void shader_callback(const char *filepath, uint64_t cookie) {
     printf("Load and recompile shader %s, index %zu.\n", filepath, cookie);
@@ -125,34 +102,23 @@ void texture_callback(const char *filepath, uint64_t cookie) {
 }
 
 int main(void) {
-    // 0 passed instead of callback address
-    firewatch_new_file_ex("shaders/example.frag", 0, 0, FILE_KIND_SHADER);
-    firewatch_new_file_ex("textures/grass.png", 0, 0, FILE_KIND_TEXTURE);
+    // Note the 0 for the last argument
+    firewatch_new_file("shaders/example.frag", 0, &shader_callback, 0);
+    firewatch_new_file("textures/grass.png", 0, &texture_callback, 0);
 
-    LoadRequest load_request = {0};
-
-    while (1) { // Frameloop etc.
-        // Check for updates and call functions if necessary
-        while(firewatch_request_stack_pop(&load_request)) {
-            switch(load_request.kind) {
-                case FILE_KIND_SHADER:
-                    shader_callback(load_request.filepath, load_request.cookie);
-                    break;
-                case FILE_KIND_TEXTURE:
-                    texture_callback(load_request.filepath, load_request.cookie);
-                    break;
-                default: 
-                    break;
-            }
-        }
-
+    while (1) {
         // Doing normal application stuff...
+
+        firewatch_check();
+        // shader_callback and texture_callback will be called from the current thread.
     }
 
     return 0;
 }
 ```
 
+### Disable hot reload
+In case you want to compile a version of your application with hot reload disabled, simply define `FIREWATCH_NO_RELOAD` for your build with either a build flag (`gcc (...) -DFIREWATCH_NO_RELOAD`) or a `#define` before including this library.
 
 ## Limitations
 Depends on the `inotify` system call so it will only work on Linux / systems compatible with the `inotify` interface.
