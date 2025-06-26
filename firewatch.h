@@ -6,6 +6,8 @@
 #define _FIREWATCH
 
 /*
+   (c) Tatu Laras 2025
+
    firewatch - A single-header library to simplify the implementation of
    hot-reload capablilities.
 
@@ -28,6 +30,7 @@
 
 #ifndef FIREWATCH_NO_RELOAD
 #include <assert.h>
+#include <poll.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
@@ -80,7 +83,15 @@ void firewatch_new_file(const char *filepath, uint64_t cookie,
 // when `load_instantly` of firewatch_new_file is set to 0).
 void firewatch_check(void);
 
+// Restores all internal state to its initial state.
+void firewatch_reset(void);
+
 #endif // _FIREWATCH
+
+#ifdef LSP_EDITOR
+#define FIREWATCH_IMPLEMENTATION
+#endif
+
 #ifdef FIREWATCH_IMPLEMENTATION
 
 #define _BUF_SIZE (1024 * (sizeof(struct inotify_event) + 16))
@@ -123,8 +134,8 @@ void fileinfovec_free(FileInfoVector *vec) {
 #ifndef FIREWATCH_NO_RELOAD
 
 static FileInfoVector fw_file_info_lists[FIREWATCH_MAX_DIRECTORIES];
-
-static int fw_inotify_fp = -1;
+static int fw_inotify_fd = -1;
+static int pipe_fds[2] = {0};
 static pthread_t fw_thread_id = 0;
 static pthread_mutex_t fw_lock;
 static FileInfoVector fw_needs_refresh_queue = {0};
@@ -146,13 +157,43 @@ static inline int fw_basename_start_index(const char *string) {
 // Will run in a thread and read inotify events, calling the callback if
 // necessary.
 static void *fw_watch_for_changes(void *_a) {
-    assert(fw_inotify_fp > 0);
+    assert(fw_inotify_fd > 0);
+    assert(pipe_fds[0] > 0);
+
+    // Waiting on the inotify fd, as well as the other end of a pipe to allow
+    // for cancellation in firewatch_deinit().
+    struct pollfd poll_fds[] = {
+        {
+            .fd = fw_inotify_fd,
+            .events = POLLIN,
+        },
+        {
+            .fd = pipe_fds[0],
+            .events = POLLIN,
+        },
+    };
+
     char buf[_BUF_SIZE] = {0};
-    size_t size, i = 0;
+    size_t size = 0;
 
     while (1) {
-        size = read(fw_inotify_fp, buf, _BUF_SIZE);
-        i = 0;
+        int result =
+            poll(poll_fds, ((sizeof poll_fds) / sizeof(*poll_fds)), -1);
+        if (result == -1) {
+            perror("FIREWATCH poll call failed");
+            return 0;
+        }
+
+        if (result == 0)
+            continue;
+        if (poll_fds[1].revents != 0)
+            return 0;
+        if (poll_fds[0].revents == 0)
+            continue;
+
+        size = read(poll_fds[0].fd, buf, _BUF_SIZE);
+
+        size_t i = 0;
         while (i < size) {
             struct inotify_event *event = (struct inotify_event *)buf + i;
             i += sizeof(struct inotify_event) + event->len;
@@ -189,32 +230,37 @@ static void *fw_watch_for_changes(void *_a) {
 }
 
 // Ensure all necassary resources have been initialized.
-static inline void _fw_ensure_init(void) {
-    if (fw_inotify_fp <= 0)
-        fw_inotify_fp = inotify_init();
+static inline void fw_ensure_init(void) {
+    if (fw_inotify_fd <= 0)
+        fw_inotify_fd = inotify_init();
+    assert((fw_inotify_fd > 0));
 
-    // Create watch thread
+    // Create watch thread and pipe for cancellation of that thread
     if (!fw_thread_id) {
-        pthread_create(&fw_thread_id, NULL, &fw_watch_for_changes, 0);
-        assert(fw_thread_id);
-        pthread_detach(fw_thread_id);
+        if (pipe(pipe_fds)) {
+            perror("FIREWATCH pipe creation failed");
+            abort();
+        }
+
+        if (pthread_create(&fw_thread_id, NULL, &fw_watch_for_changes, 0)) {
+            perror("FIREWATCH thread creation failed");
+            abort();
+        }
     }
 
     if (!fw_needs_refresh_queue.data)
         fw_needs_refresh_queue = fileinfovec_init();
-
-    assert((fw_inotify_fp > 0));
 }
-#endif // FIREWATCH_NO_RELOAD
+#endif // !FIREWATCH_NO_RELOAD
 
-//  TODO: Return handle, removable watch
+//  TODO: Be able to cancel watch
 void firewatch_new_file(const char *filepath, uint64_t cookie,
                         FileRefreshFunction on_change_callback,
                         int load_instantly) {
 #ifdef FIREWATCH_NO_RELOAD
     (*on_change_callback)(filepath, cookie);
 #else
-    _fw_ensure_init();
+    fw_ensure_init();
 
     FileInfo file_info = {.on_change_callback = on_change_callback,
                           .using_stack = !load_instantly,
@@ -232,11 +278,12 @@ void firewatch_new_file(const char *filepath, uint64_t cookie,
         memcpy(directory, filepath, filename_start);
 
     // Create watch
-    int wd = inotify_add_watch(fw_inotify_fp, directory,
+    int wd = inotify_add_watch(fw_inotify_fd, directory,
                                IN_CLOSE_WRITE | IN_MOVED_TO);
     if (wd <= 0) {
         fprintf(stderr,
-                "ERROR: could not begin watching changes on file %s, maybe "
+                "FIREWATCH ERROR: could not begin watching changes on file %s, "
+                "maybe "
                 "the parent directory of the file does not exist?\n",
                 filepath);
         return;
@@ -271,6 +318,20 @@ void firewatch_check(void) {
     }
 
     pthread_mutex_unlock(&fw_lock);
+#endif
+}
+
+void firewatch_reset(void) {
+#ifndef FIREWATCH_NO_RELOAD
+    if (!pipe_fds[1])
+        return;
+
+    char buf = 0;
+    write(pipe_fds[1], &buf, 1);
+    pthread_join(fw_thread_id, 0);
+
+    close(pipe_fds[0]);
+    close(pipe_fds[1]);
 #endif
 }
 
