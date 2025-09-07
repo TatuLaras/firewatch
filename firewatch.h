@@ -1,3 +1,6 @@
+//  TODO: Function that takes in c source filepath, compiles when changed and
+//  calls callback with a dlopen handle.
+
 #ifndef FIREWATCH_MAX_DIRECTORIES
 #define FIREWATCH_MAX_DIRECTORIES 32
 #endif
@@ -156,7 +159,7 @@ static inline int fw_basename_start_index(const char *string) {
 
 // Will run in a thread and read inotify events, calling the callback if
 // necessary.
-static void *fw_watch_for_changes(void *_a) {
+static void *fw_watch_for_changes(void *_) {
     assert(fw_inotify_fd > 0);
     assert(pipe_fds[0] > 0);
 
@@ -227,6 +230,7 @@ static void *fw_watch_for_changes(void *_a) {
     }
 
     return 0;
+    (void)_;
 }
 
 // Ensure all necassary resources have been initialized.

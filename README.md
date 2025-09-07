@@ -1,6 +1,10 @@
 # firewatch
 Firewatch is a single-header library that makes it simpler to implement hot-reload functionality for files.
 
+## Command line utility for dynamic C source file compilation and hot reloading
+There is now a command line utility `fr` that enables you to use C as kind of a scripting language.
+It can be compiled by running `make`, and/or installed into `/usr/bin` with `make install`.
+
 ## Installation
 Copy the `firewatch.h` header file somewhere in your codebase.
 As a lot of other single-header libraries, it works by defining an especially named macro in exactly one of your source files before including that header file:
